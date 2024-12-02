@@ -41,6 +41,9 @@ let 更新时间 = 3;//更新时间
 let userIDLow;
 let userIDTime = "";
 let proxyIPPool = [];
+// 添加新的配置变量
+let proxyIPDomains = []; // 走proxyIP的域名规则
+let socks5Domains = []; // 走socks5的域名规则
 export default {
 	async fetch(request, env, ctx) {
 		try {
@@ -115,6 +118,8 @@ export default {
 			if (env.ADDNOTLS) addressesnotls = await 整理(env.ADDNOTLS);
 			if (env.ADDNOTLSAPI) addressesnotlsapi = await 整理(env.ADDNOTLSAPI);
 			if (env.ADDCSV) addressescsv = await 整理(env.ADDCSV);
+			if (env.PROXYIP_DOMAINS) proxyIPDomains = await 整理(env.PROXYIP_DOMAINS);
+     			if (env.SOCKS5_DOMAINS) socks5Domains = await 整理(env.SOCKS5_DOMAINS);
 			DLS = env.DLS || DLS;
 			BotToken = env.TGTOKEN || BotToken;
 			ChatID = env.TGID || ChatID; 
@@ -212,6 +217,20 @@ export default {
 		}
 	},
 };
+
+// 添加域名匹配函数
+function matchDomain(domain, patterns) {
+    return patterns.some(pattern => {
+        // 将通配符模式转换为正则表达式
+        const regexPattern = pattern
+            .replace(/\./g, '\\.')  // 转义点号
+            .replace(/\*/g, '.*')   // 将星号转换为正则的通配符
+            .replace(/\?/g, '.');   // 将问号转换为单字符匹配
+        
+        const regex = new RegExp(`^${regexPattern}$`, 'i');
+        return regex.test(domain);
+    });
+}
 
 async function vlessOverWSHandler(request) {
 
@@ -316,75 +335,110 @@ async function vlessOverWSHandler(request) {
 }
 
 async function handleTCPOutBound(remoteSocket, addressType, addressRemote, portRemote, rawClientData, webSocket, vlessResponseHeader, log,) {
-	async function useSocks5Pattern(address) {
-		if ( go2Socks5s.includes(atob('YWxsIGlu')) || go2Socks5s.includes(atob('Kg==')) ) return true;
-		return go2Socks5s.some(pattern => {
-			let regexPattern = pattern.replace(/\*/g, '.*');
-			let regex = new RegExp(`^${regexPattern}$`, 'i');
-			return regex.test(address);
-		});
-	}
+    // 确定使用哪种代理方式
+    let useProxyIP = matchDomain(addressRemote, proxyIPDomains);
+    let useSocks5 = matchDomain(addressRemote, socks5Domains);
 
-	async function connectAndWrite(address, port, socks = false) {
-		log(`connected to ${address}:${port}`);
-		//if (/^(?:(?:25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?).){3}(?:25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)$/.test(address)) address = `${atob('d3d3Lg==')}${address}${atob('LmlwLjA5MDIyNy54eXo=')}`;
-		// 如果指定使用 SOCKS5 代理，则通过 SOCKS5 协议连接；否则直接连接
-		const tcpSocket = socks ? await socks5Connect(addressType, address, port, log)
-			: connect({
-				hostname: address,
-				port: port,
-			});
-		remoteSocket.value = tcpSocket;
-		//log(`connected to ${address}:${port}`);
-		const writer = tcpSocket.writable.getWriter();
-		// 首次写入，通常是 TLS 客户端 Hello 消息
-		await writer.write(rawClientData);
-		writer.releaseLock();
-		return tcpSocket;
-	}
+    async function connectAndWrite(address, port) {
+        log(`connecting to ${address}:${port}`);
+        
+        let tcpSocket;
+        // 如果两种规则都匹配，优先使用socks5
+        if (useSocks5 && enableSocks) {
+            log(`使用socks5代理连接: ${address}`);
+            tcpSocket = await socks5Connect(addressType, address, port, log);
+        } else if (useProxyIP && proxyIP) {
+            log(`使用proxyIP代理连接: ${address}`);
+            if (!proxyIP || proxyIP == '') {
+                proxyIP = atob('UFJPWFlJUC50cDEuZnh4ay5kZWR5bi5pbw==');
+            }
+            let proxyPort = port;
+            if (proxyIP.includes(']:')) {
+                proxyPort = proxyIP.split(']:')[1] || proxyPort;
+                proxyIP = proxyIP.split(']:')[0] || proxyIP;
+            } else if (proxyIP.split(':').length === 2) {
+                proxyPort = proxyIP.split(':')[1] || proxyPort;
+                proxyIP = proxyIP.split(':')[0] || proxyIP;
+            }
+            if (proxyIP.includes('.tp')) {
+                proxyPort = proxyIP.split('.tp')[1].split('.')[0] || proxyPort;
+            }
+            tcpSocket = await connect({
+                hostname: proxyIP,
+                port: proxyPort,
+            });
+        } else {
+            // 默认直连
+            log(`直接连接: ${address}`);
+            tcpSocket = await connect({
+                hostname: address,
+                port: port,
+            });
+        }
 
-	/**
-	 * 重试函数：当 Cloudflare 的 TCP Socket 没有传入数据时，我们尝试重定向 IP
-	 * 这可能是因为某些网络问题导致的连接失败
-	 */
-	async function retry() {
-		if (enableSocks) {
-			// 如果启用了 SOCKS5，通过 SOCKS5 代理重试连接
-			tcpSocket = await connectAndWrite(addressRemote, portRemote, true);
-		} else {
-			// 否则，尝试使用预设的代理 IP（如果有）或原始地址重试连接
-			if (!proxyIP || proxyIP == '') {
-				proxyIP = atob(`UFJPWFlJUC50cDEuZnh4ay5kZWR5bi5pbw==`);
-			} else if (proxyIP.includes(']:')) {
-				portRemote = proxyIP.split(']:')[1] || portRemote;
-				proxyIP = proxyIP.split(']:')[0] || proxyIP;
-			} else if (proxyIP.split(':').length === 2) {
-				portRemote = proxyIP.split(':')[1] || portRemote;
-				proxyIP = proxyIP.split(':')[0] || proxyIP;
-			}
-			if (proxyIP.includes('.tp')) portRemote = proxyIP.split('.tp')[1].split('.')[0] || portRemote;
-			tcpSocket = await connectAndWrite(proxyIP || addressRemote, portRemote);
-		}
-		// 无论重试是否成功，都要关闭 WebSocket（可能是为了重新建立连接）
-		tcpSocket.closed.catch(error => {
-			console.log('retry tcpSocket closed error', error);
-		}).finally(() => {
-			safeCloseWebSocket(webSocket);
-		})
-		// 建立从远程 Socket 到 WebSocket 的数据流
-		remoteSocketToWS(tcpSocket, webSocket, vlessResponseHeader, null, log);
-	}
+        remoteSocket.value = tcpSocket;
+        const writer = tcpSocket.writable.getWriter();
+        await writer.write(rawClientData);
+        writer.releaseLock();
+        return tcpSocket;
+    }
 
-	let useSocks = false;
-	if( go2Socks5s.length > 0 && enableSocks ) useSocks = await useSocks5Pattern(addressRemote);
-	// 首次尝试连接远程服务器
-	let tcpSocket = await connectAndWrite(addressRemote, portRemote, useSocks);
+    /**
+     * 重试函数：当连接失败时进行重试
+     * 保持与初始连接相同的代理策略
+     */
+    async function retry() {
+        let tcpSocket;
+        if (useSocks5 && enableSocks) {
+            // 如果原本使用 socks5，重试也使用 socks5
+            tcpSocket = await connectAndWrite(addressRemote, portRemote);
+        } else if (useProxyIP && proxyIP) {
+            // 如果原本使用 proxyIP，重试也使用 proxyIP
+            tcpSocket = await connectAndWrite(addressRemote, portRemote);
+        } else {
+            // 如果原本是直连，重试时尝试使用备选方案
+            if (enableSocks) {
+                tcpSocket = await socks5Connect(addressType, addressRemote, portRemote, log);
+            } else if (proxyIP && proxyIP != '') {
+                let proxyPort = portRemote;
+                if (proxyIP.includes(']:')) {
+                    proxyPort = proxyIP.split(']:')[1] || proxyPort;
+                    proxyIP = proxyIP.split(']:')[0] || proxyIP;
+                } else if (proxyIP.split(':').length === 2) {
+                    proxyPort = proxyIP.split(':')[1] || proxyPort;
+                    proxyIP = proxyIP.split(':')[0] || proxyIP;
+                }
+                if (proxyIP.includes('.tp')) {
+                    proxyPort = proxyIP.split('.tp')[1].split('.')[0] || proxyPort;
+                }
+                tcpSocket = await connect({
+                    hostname: proxyIP,
+                    port: proxyPort,
+                });
+            } else {
+                tcpSocket = await connect({
+                    hostname: addressRemote,
+                    port: portRemote,
+                });
+            }
+        }
 
-	// 当远程 Socket 就绪时，将其传递给 WebSocket
-	// 建立从远程服务器到 WebSocket 的数据流，用于将远程服务器的响应发送回客户端
-	// 如果连接失败或无数据，retry 函数将被调用进行重试
-	remoteSocketToWS(tcpSocket, webSocket, vlessResponseHeader, retry, log);
+        tcpSocket.closed.catch(error => {
+            console.log('retry tcpSocket closed error', error);
+        }).finally(() => {
+            safeCloseWebSocket(webSocket);
+        });
+
+        remoteSocketToWS(tcpSocket, webSocket, vlessResponseHeader, null, log);
+    }
+
+    // 首次尝试连接
+    let tcpSocket = await connectAndWrite(addressRemote, portRemote);
+
+    // 建立从远程服务器到 WebSocket 的数据流
+    remoteSocketToWS(tcpSocket, webSocket, vlessResponseHeader, retry, log);
 }
+
 
 function makeReadableWebSocketStream(webSocketServer, earlyDataHeader, log) {
 	// 标记可读流是否已被取消
