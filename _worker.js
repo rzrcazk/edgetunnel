@@ -44,6 +44,103 @@ let proxyIPPool = [];
 // 添加新的配置变量
 let proxyIPDomains = []; // 走proxyIP的域名规则
 let socks5Domains = []; // 走socks5的域名规则
+
+
+/**
+ * 解析域名规则文本
+ * @param {string} content 规则文本内容
+ * @returns {string[]} 解析后的域名列表
+ */
+async function parseDomainRules(content) {
+    const domains = [];
+    const lines = content.split('\n');
+    
+    for (const line of lines) {
+        if (!line || line.trim().startsWith('#')) {
+            continue;
+        }
+
+        const trimmedLine = line.trim();
+        let domain = '';
+
+        if (trimmedLine.startsWith('DOMAIN,')) {
+            domain = trimmedLine.split(',')[1];
+        } else if (trimmedLine.startsWith('DOMAIN-SUFFIX,')) {
+            const suffix = trimmedLine.split(',')[1];
+            domain = `*.${suffix}`;
+        } else if (trimmedLine.startsWith('DOMAIN-KEYWORD,')) {
+            const keyword = trimmedLine.split(',')[1];
+            domain = `*.${keyword}.*`;
+        } else if (trimmedLine.match(/^[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$/)) {
+            domain = trimmedLine;
+        }
+
+        if (domain) {
+            domains.push(domain);
+        }
+    }
+
+    return domains;
+}
+
+/**
+ * 从URL获取并解析域名规则
+ * @param {string} url 规则文件的URL
+ */
+async function fetchAndParseDomainRules(url) {
+    try {
+        const response = await fetch(url);
+        if (!response.ok) {
+            throw new Error(`HTTP error! status: ${response.status}`);
+        }
+        const content = await response.text();
+        return await parseDomainRules(content);
+    } catch (error) {
+        console.error(`Error fetching rules from ${url}:`, error);
+        return [];
+    }
+}
+
+/**
+ * 初始化域名规则
+ * @param {Object} env 环境变量对象
+ */
+async function initializeDomainRules(env) {
+    // 处理 SOCKS5 规则
+    if (env.SOCKS5_RULE_URLS) {
+        const urls = await 整理(env.SOCKS5_RULE_URLS);
+        for (const url of urls) {
+            const rules = await fetchAndParseDomainRules(url);
+            socks5Domains = [...socks5Domains, ...rules];
+        }
+    }
+
+    // 处理 ProxyIP 规则
+    if (env.PROXYIP_RULE_URLS) {
+        const urls = await 整理(env.PROXYIP_RULE_URLS);
+        for (const url of urls) {
+            const rules = await fetchAndParseDomainRules(url);
+            proxyIPDomains = [...proxyIPDomains, ...rules];
+        }
+    }
+
+    // 去重
+    socks5Domains = [...new Set(socks5Domains)];
+    proxyIPDomains = [...new Set(proxyIPDomains)];
+
+    // 添加直接在环境变量中配置的域名规则（保持向后兼容）
+    if (env.SOCKS5_DOMAINS) {
+        const additionalDomains = await 整理(env.SOCKS5_DOMAINS);
+        socks5Domains = [...socks5Domains, ...additionalDomains];
+    }
+    if (env.PROXYIP_DOMAINS) {
+        const additionalDomains = await 整理(env.PROXYIP_DOMAINS);
+        proxyIPDomains = [...proxyIPDomains, ...additionalDomains];
+    }
+}
+
+
+
 export default {
 	async fetch(request, env, ctx) {
 		try {
